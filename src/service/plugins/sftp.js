@@ -55,8 +55,6 @@ const SFTPPlugin = GObject.registerClass({
 
         this._gmount = null;
         this._mounting = false;
-        this._sshfsProcess = null;
-        this._sshfsMountPath = null;
 
         // A reusable launcher for ssh processes
         this._launcher = new Gio.SubprocessLauncher({
@@ -79,68 +77,23 @@ const SFTPPlugin = GObject.registerClass({
     }
 
     /**
-     * Get the mount-root setting value.
-     *
-     * @returns {string} The mount root subdirectory or empty string
-     */
-    get mountRoot() {
-        return this.settings.get_string('mount-root');
-    }
-
-    /**
-     * Get the sshfs mount directory path for this device.
-     *
-     * @returns {string} Path to the mount directory
-     */
-    _getSshfsMountPath() {
-        let safe_device_name = this.device.name.replace('/', '∕');
-
-        if (safe_device_name === '.')
-            safe_device_name = '·';
-        else if (safe_device_name === '..')
-            safe_device_name = '··';
-
-        return GLib.build_filenamev([
-            Config.RUNTIMEDIR, 'mounts', safe_device_name,
-        ]);
-    }
-
-    /**
      * Get the effective root GFile, taking mount-root setting into account.
      *
      * @param {Gio.Mount} mount - The GMount to get the root from
      * @returns {Gio.File} The effective root directory
      */
     _getEffectiveRoot(mount) {
-        // If using sshfs mount, the mount path IS the effective root
-        if (this._sshfsMountPath)
-            return Gio.File.new_for_path(this._sshfsMountPath);
-
+        const mountRoot = this.settings.get_string('mount-root');
         const root = mount.get_root();
 
-        if (this.mountRoot)
-            return root.resolve_relative_path(this.mountRoot);
+        if (mountRoot)
+            return root.resolve_relative_path(mountRoot);
 
         return root;
     }
 
     get gmount() {
         if (this._gmount === null && this.device.connected) {
-            // If using sshfs, check if the mount path exists
-            if (this._sshfsMountPath) {
-                const mountDir = Gio.File.new_for_path(this._sshfsMountPath);
-                try {
-                    mountDir.query_info(
-                        Gio.FILE_ATTRIBUTE_STANDARD_TYPE,
-                        Gio.FileQueryInfoFlags.NONE,
-                        null);
-                    // sshfs mount is active, return a sentinel
-                    return this._gmount;
-                } catch (e) {
-                    // Mount not available
-                }
-            }
-
             const host = this.device.channel.host;
 
             const regex = new RegExp(
@@ -213,12 +166,7 @@ const SFTPPlugin = GObject.registerClass({
     }
 
     async _listDirectories(mount) {
-        let file;
-
-        if (this._sshfsMountPath)
-            file = Gio.File.new_for_path(this._sshfsMountPath);
-        else
-            file = this._getEffectiveRoot(mount);
+        const file = this._getEffectiveRoot(mount);
 
         const iter = await file.enumerate_children_async(
             Gio.FILE_ATTRIBUTE_STANDARD_NAME,
@@ -234,10 +182,7 @@ const SFTPPlugin = GObject.registerClass({
 
         for (const info of infos) {
             const name = info.get_name();
-            const dirUri = this._sshfsMountPath
-                ? `file://${this._sshfsMountPath}/${name}/`
-                : `${file.get_uri()}/${name}/`;
-            directories[name] = dirUri;
+            directories[name] = `${file.get_uri()}/${name}/`;
         }
 
         return directories;
@@ -267,8 +212,7 @@ const SFTPPlugin = GObject.registerClass({
     }
 
     /**
-     * Mount the remote device using sshfs when mount-root is set,
-     * or fall back to GIO mount_enclosing_volume.
+     * Mount the remote device using the provided information.
      *
      * @param {Core.Packet} packet - a `kdeconnect.sftp`
      */
@@ -283,219 +227,35 @@ const SFTPPlugin = GObject.registerClass({
             // Ensure the private key is in the keyring
             await this._addPrivateKey();
 
-            const host = this.device.channel.host;
-            const port = packet.body.port;
-            const user = packet.body.user || 'kdeconnect';
-            const password = packet.body.password || '';
+            // Create a new mount operation
+            const op = new Gio.MountOperation({
+                username: packet.body.user || null,
+                password: packet.body.password || null,
+                password_save: Gio.PasswordSave.NEVER,
+            });
 
-            // Use sshfs when mount-root is configured
-            if (this.mountRoot) {
-                await this._handleSshfsMount(host, port, user, password);
-            } else {
-                await this._handleGioMount(packet, host, port);
-            }
+            op.connect('ask-question', this._onAskQuestion);
+            op.connect('ask-password', this._onAskPassword);
+
+            // This is the actual call to mount the device
+            const host = this.device.channel.host;
+            const uri = `sftp://${host}:${packet.body.port}/`;
+            const file = Gio.File.new_for_uri(uri);
+
+            await file.mount_enclosing_volume(GLib.PRIORITY_DEFAULT, op,
+                this.cancellable);
         } catch (e) {
-            if (e.matches && e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.ALREADY_MOUNTED))
+            // Special case when the GMount didn't unmount properly but is still
+            // on the same port and can be reused.
+            if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.ALREADY_MOUNTED))
                 return;
 
+            // There's a good chance this is a host key verification error;
+            // regardless we'll remove the key for security.
             this._removeHostKey(this.device.channel.host);
             logError(e, this.device.name);
         } finally {
             this._mounting = false;
-        }
-    }
-
-    /**
-     * Mount using sshfs directly at the mount-root subdirectory.
-     *
-     * @param {string} host - Remote host
-     * @param {number} port - Remote port
-     * @param {string} user - SSH username
-     * @param {string} password - SSH password
-     */
-    async _handleSshfsMount(host, port, user, password) {
-        const mountPath = this._getSshfsMountPath();
-        const remotePath = `/${this.mountRoot}`;
-
-        // Create mount directory
-        const mountDir = Gio.File.new_for_path(mountPath);
-        try {
-            mountDir.make_directory_with_parents(null);
-        } catch (e) {
-            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
-                throw e;
-        }
-
-        // Build sshfs command
-        const privateKey = GLib.build_filenamev([Config.CONFIGDIR, 'private.pem']);
-        const args = [
-            'sshfs',
-            `${user}@${host}:${remotePath}`,
-            mountPath,
-            '-p', `${port}`,
-            '-o', `IdentityFile=${privateKey}`,
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', 'UserKnownHostsFile=/dev/null',
-            '-o', `password_stdin`,
-            '-o', 'ServerAliveInterval=15',
-            '-o', 'ServerAliveCountMax=3',
-            '-o', 'reconnect',
-            '-o', `uid=${GLib.getenv('UID') || new GLib.SpawnFlags()}`,
-        ];
-
-        // Get UID properly
-        const uid = GLib.spawn_command_line_sync('id -u')[1];
-        const gid = GLib.spawn_command_line_sync('id -g')[1];
-        const uidStr = new TextDecoder().decode(uid).trim();
-        const gidStr = new TextDecoder().decode(gid).trim();
-
-        const sshfsArgs = [
-            'sshfs',
-            `${user}@${host}:${remotePath}`,
-            mountPath,
-            '-p', `${port}`,
-            '-o', `IdentityFile=${privateKey}`,
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', 'UserKnownHostsFile=/dev/null',
-            '-o', 'password_stdin',
-            '-o', 'ServerAliveInterval=15',
-            '-o', 'ServerAliveCountMax=3',
-            '-o', 'reconnect',
-            '-o', `uid=${uidStr}`,
-            '-o', `gid=${gidStr}`,
-        ];
-
-        // Spawn sshfs with password on stdin
-        const launcher = new Gio.SubprocessLauncher({
-            flags: (Gio.SubprocessFlags.STDIN_PIPE |
-                    Gio.SubprocessFlags.STDOUT_PIPE |
-                    Gio.SubprocessFlags.STDERR_MERGE),
-        });
-
-        const sshfs = launcher.spawnv(sshfsArgs);
-
-        // Send password via stdin
-        const [stdout] = await sshfs.communicate_utf8_async(
-            `${password}\n`, this.cancellable);
-
-        const status = sshfs.get_exit_status();
-
-        if (status !== 0) {
-            throw new Error(
-                `sshfs failed (exit ${status}): ${stdout ? stdout.trim() : 'unknown error'}`
-            );
-        }
-
-        this._sshfsMountPath = mountPath;
-
-        // Create a sentinel gmount object for tracking state
-        this._gmount = {_sshfs: true};
-
-        // Add submenu and symlink
-        this._addSshfsSubmenu();
-        this._addSshfsSymlink();
-    }
-
-    /**
-     * Mount using the original GIO method (mount_enclosing_volume).
-     *
-     * @param {Core.Packet} packet - a `kdeconnect.sftp`
-     * @param {string} host - Remote host
-     * @param {number} port - Remote port
-     */
-    async _handleGioMount(packet, host, port) {
-        const op = new Gio.MountOperation({
-            username: packet.body.user || null,
-            password: packet.body.password || null,
-            password_save: Gio.PasswordSave.NEVER,
-        });
-
-        op.connect('ask-question', this._onAskQuestion);
-        op.connect('ask-password', this._onAskPassword);
-
-        const uri = `sftp://${host}:${port}/`;
-        const file = Gio.File.new_for_uri(uri);
-
-        await file.mount_enclosing_volume(GLib.PRIORITY_DEFAULT, op,
-            this.cancellable);
-    }
-
-    /**
-     * Add submenu for sshfs mount (uses local file paths instead of GMount).
-     */
-    async _addSshfsSubmenu() {
-        try {
-            const directories = await this._listDirectories(null);
-
-            const dirSection = new Gio.Menu();
-            const unmountSection = this._getUnmountSection();
-
-            for (const [name, uri] of Object.entries(directories))
-                dirSection.append(name, `device.openPath::${uri}`);
-
-            const filesSubmenu = new Gio.Menu();
-            filesSubmenu.append_section(null, dirSection);
-            filesSubmenu.append_section(null, unmountSection);
-
-            const filesMenuItem = this._getFilesMenuItem();
-            filesMenuItem.set_submenu(filesSubmenu);
-
-            const index = this.device.removeMenuAction('device.mount');
-            this.device.addMenuItem(filesMenuItem, index);
-        } catch (e) {
-            if (!e.matches || !e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
-                debug(e, this.device.name);
-
-            this._gmount = null;
-        }
-    }
-
-    /**
-     * Create a symbolic link for sshfs mount.
-     */
-    async _addSshfsSymlink() {
-        try {
-            const by_name_dir = Gio.File.new_for_path(
-                `${Config.RUNTIMEDIR}/by-name/`
-            );
-
-            try {
-                by_name_dir.make_directory_with_parents(null);
-            } catch (e) {
-                if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
-                    throw e;
-            }
-
-            let safe_device_name = this.device.name.replace('/', '∕');
-
-            if (safe_device_name === '.')
-                safe_device_name = '·';
-            else if (safe_device_name === '..')
-                safe_device_name = '··';
-
-            const link = Gio.File.new_for_path(
-                `${by_name_dir.get_path()}/${safe_device_name}`);
-
-            try {
-                const link_stat = await link.query_info_async(
-                    'standard::symlink-target',
-                    Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS,
-                    GLib.PRIORITY_DEFAULT,
-                    this.cancellable);
-
-                if (link_stat.get_symlink_target() === this._sshfsMountPath)
-                    return;
-
-                await link.delete_async(GLib.PRIORITY_DEFAULT,
-                    this.cancellable);
-            } catch (e) {
-                if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND))
-                    throw e;
-            }
-
-            link.make_symbolic_link(this._sshfsMountPath, this.cancellable);
-        } catch (e) {
-            debug(e, this.device.name);
         }
     }
 
@@ -715,57 +475,22 @@ const SFTPPlugin = GObject.registerClass({
      */
     async unmount() {
         try {
-            if (this.gmount === null && !this._sshfsMountPath)
+            if (this.gmount === null)
                 return;
 
             this._removeSubmenu();
             this._mounting = false;
 
-            // Unmount sshfs if active
-            if (this._sshfsMountPath) {
-                try {
-                    const fusermount = this._launcher.spawnv([
-                        'fusermount', '-u', this._sshfsMountPath,
-                    ]);
-                    await fusermount.communicate_utf8_async(null,
-                        this.cancellable);
-                } catch (e) {
-                    // Try lazy unmount as fallback
-                    try {
-                        const fusermount = this._launcher.spawnv([
-                            'fusermount', '-uz', this._sshfsMountPath,
-                        ]);
-                        await fusermount.communicate_utf8_async(null,
-                            this.cancellable);
-                    } catch (e2) {
-                        debug(e2, this.device.name);
-                    }
-                }
-                this._sshfsMountPath = null;
-                this._gmount = null;
-            } else if (this._gmount) {
-                await this.gmount.unmount_with_operation(
-                    Gio.MountUnmountFlags.FORCE,
-                    new Gio.MountOperation(),
-                    this.cancellable);
-            }
+            await this.gmount.unmount_with_operation(
+                Gio.MountUnmountFlags.FORCE,
+                new Gio.MountOperation(),
+                this.cancellable);
         } catch (e) {
             debug(e, this.device.name);
         }
     }
 
     destroy() {
-        // Clean up sshfs mount on destroy
-        if (this._sshfsMountPath) {
-            try {
-                GLib.spawn_command_line_sync(
-                    `fusermount -uz ${this._sshfsMountPath}`);
-            } catch (e) {
-                // Best effort cleanup
-            }
-            this._sshfsMountPath = null;
-        }
-
         if (this._volumeMonitor) {
             this._volumeMonitor.disconnect(this._mountAddedId);
             this._volumeMonitor.disconnect(this._mountRemovedId);
