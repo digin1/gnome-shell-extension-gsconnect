@@ -291,6 +291,9 @@ export const Panel = GObject.registerClass({
         'shortcuts-page',
         'shortcuts-actions', 'shortcuts-actions-title', 'shortcuts-actions-list',
 
+        // SFTP
+        'sftp-mount-root',
+
         // Advanced
         'advanced-page',
         'plugin-list', 'experimental-list',
@@ -465,6 +468,12 @@ export const Panel = GObject.registerClass({
 
         settings = this.pluginSettings('sftp');
         this.actions.add_action(settings.create_action('automount'));
+
+        // Bind mount-root entry to setting
+        this.sftp_mount_root.text = settings.get_string('mount-root');
+        this.sftp_mount_root.connect('changed', () => {
+            settings.set_string('mount-root', this.sftp_mount_root.text);
+        });
 
         settings = this.pluginSettings('share');
         this.actions.add_action(settings.create_action('receive-files'));

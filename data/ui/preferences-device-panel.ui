@@ -2214,6 +2214,60 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 </accessibility>
                               </object>
                             </child>
+                            <child>
+                              <object class="GtkListBoxRow" id="sftp-mount-root-row">
+                                <property name="height_request">56</property>
+                                <property name="visible">True</property>
+                                <property name="can_focus">True</property>
+                                <property name="selectable">False</property>
+                                <child>
+                                  <object class="GtkGrid">
+                                    <property name="visible">True</property>
+                                    <property name="can_focus">False</property>
+                                    <property name="margin_start">12</property>
+                                    <property name="margin_end">12</property>
+                                    <property name="column_spacing">12</property>
+                                    <child>
+                                      <object class="GtkLabel" id="sftp-mount-root-label">
+                                        <property name="visible">True</property>
+                                        <property name="can_focus">False</property>
+                                        <property name="halign">start</property>
+                                        <property name="valign">center</property>
+                                        <property name="hexpand">True</property>
+                                        <property name="vexpand">True</property>
+                                        <property name="label" translatable="yes">Mount Root</property>
+                                        <property name="tooltip_text" translatable="yes">Subdirectory to use as mount root (e.g. "sdcard")</property>
+                                        <accessibility>
+                                          <relation type="label-for" target="sftp-mount-root"/>
+                                        </accessibility>
+                                      </object>
+                                      <packing>
+                                        <property name="left_attach">0</property>
+                                        <property name="top_attach">0</property>
+                                      </packing>
+                                    </child>
+                                    <child>
+                                      <object class="GtkEntry" id="sftp-mount-root">
+                                        <property name="visible">True</property>
+                                        <property name="can_focus">True</property>
+                                        <property name="halign">end</property>
+                                        <property name="valign">center</property>
+                                        <property name="width_chars">15</property>
+                                        <property name="placeholder_text">e.g. sdcard</property>
+                                        <property name="text" translatable="no"></property>
+                                        <accessibility>
+                                          <relation type="labelled-by" target="sftp-mount-root-label"/>
+                                        </accessibility>
+                                      </object>
+                                      <packing>
+                                        <property name="left_attach">1</property>
+                                        <property name="top_attach">0</property>
+                                      </packing>
+                                    </child>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
                             <accessibility>
                               <relation type="labelled-by" target="experimental-label"/>
                             </accessibility>

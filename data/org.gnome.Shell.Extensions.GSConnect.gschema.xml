@@ -155,6 +155,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <key name="automount" type="b">
       <default>true</default>
     </key>
+    <key name="mount-root" type="s">
+      <default>""</default>
+      <summary>Mount root subdirectory</summary>
+      <description>Subdirectory to use as the effective mount root (e.g. "sdcard"). When set, file browsing, symlinks, and the sidebar entry will point to this subdirectory instead of the filesystem root.</description>
+    </key>
   </schema>
   <schema id="org.gnome.Shell.Extensions.GSConnect.Plugin.Share">
     <key name="receive-files" type="b">

@@ -76,6 +76,22 @@ const SFTPPlugin = GObject.registerClass({
         );
     }
 
+    /**
+     * Get the effective root GFile, taking mount-root setting into account.
+     *
+     * @param {Gio.Mount} mount - The GMount to get the root from
+     * @returns {Gio.File} The effective root directory
+     */
+    _getEffectiveRoot(mount) {
+        const mountRoot = this.settings.get_string('mount-root');
+        const root = mount.get_root();
+
+        if (mountRoot)
+            return root.resolve_relative_path(mountRoot);
+
+        return root;
+    }
+
     get gmount() {
         if (this._gmount === null && this.device.connected) {
             const host = this.device.channel.host;
@@ -150,7 +166,7 @@ const SFTPPlugin = GObject.registerClass({
     }
 
     async _listDirectories(mount) {
-        const file = mount.get_root();
+        const file = this._getEffectiveRoot(mount);
 
         const iter = await file.enumerate_children_async(
             Gio.FILE_ATTRIBUTE_STANDARD_NAME,
@@ -166,7 +182,7 @@ const SFTPPlugin = GObject.registerClass({
 
         for (const info of infos) {
             const name = info.get_name();
-            directories[name] = `${file.get_uri()}${name}/`;
+            directories[name] = `${file.get_uri()}/${name}/`;
         }
 
         return directories;
@@ -411,7 +427,7 @@ const SFTPPlugin = GObject.registerClass({
             else if (safe_device_name === '..')
                 safe_device_name = '··';
 
-            const link_target = mount.get_root().get_path();
+            const link_target = this._getEffectiveRoot(mount).get_path();
             const link = Gio.File.new_for_path(
                 `${by_name_dir.get_path()}/${safe_device_name}`);
 
